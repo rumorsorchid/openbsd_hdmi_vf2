@@ -1,0 +1,11 @@
+#	HDMIFB: VisionFive 2 kernel = stock GENERIC.MP + the firmware framebuffer.
+#
+# The firmware (U-Boot from this repository) brings HDMI up and hands the
+# framebuffer over through the EFI GOP at the JH7110's uncached view of
+# DRAM, so the stock simplefb driver needs no changes.  Installed by
+# vf2-kernel as /usr/src/sys/arch/riscv64/conf/HDMIFB.
+
+include "arch/riscv64/conf/GENERIC.MP"
+
+simplefb*	at fdt?
+wsdisplay*	at simplefb?

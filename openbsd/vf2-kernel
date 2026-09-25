@@ -1,0 +1,235 @@
+#!/bin/ksh
+#
+# vf2-kernel: keep the VisionFive 2 HDMIFB kernel (stock GENERIC.MP plus
+# simplefb, no source patches) in step with the installed OpenBSD release
+# and its syspatches.
+#
+#   vf2-kernel status        what is installed, running and selected
+#   vf2-kernel check         offline: is a rebuild due? (exit 1 if so)
+#   vf2-kernel build [-f]    update /usr/src/sys to the -stable branch,
+#                            rebuild if anything changed, install /bsd-hdmi
+#   vf2-kernel activate [-f] make /bsd-hdmi the default (only while running
+#                            it, unless -f)
+#   vf2-kernel rollback      make /bsd-hdmi.prev (else /bsd) the default
+#   vf2-kernel pre-upgrade   make stock /bsd the default before sysupgrade
+#
+# It never touches /bsd and never reboots.  Packages (Firefox & co.) keep
+# coming prebuilt from pkg_add; only this kernel is compiled locally.
+
+set -eu
+set -o pipefail
+umask 022
+PATH=/sbin:/usr/sbin:/bin:/usr/bin:/usr/local/sbin:/usr/local/bin
+
+VF2_DIR=${VF2_DIR:-/root/vf2}
+CONF=HDMIFB
+CONF_SRC=$VF2_DIR/HDMIFB
+SRC=/usr/src
+SYS=$SRC/sys
+KERNEL=/bsd-hdmi
+BOOTCONF=/etc/boot.conf
+STAMP=/var/db/vf2-kernel.stamp
+LOG=/var/log/vf2-kernel.log
+LOCK=/var/run/vf2-kernel.lock
+CVSROOT=${VF2_CVSROOT:-anoncvs@anoncvs.ca.openbsd.org:/cvs}
+MIRROR=${VF2_MIRROR:-https://cdn.openbsd.org/pub/OpenBSD}
+
+die()  { print -u2 -- "vf2-kernel: $*"; exit 2; }
+say()  { print -- ">>> $*"; }
+
+need_root() { [ "$(id -u)" -eq 0 ] || die "run as root"; }
+
+release() { uname -r; }
+branch()  { print -- "OPENBSD_$(release | tr . _)"; }
+
+refuse_current() {
+	case "$(sysctl -n kern.version | head -1)" in
+	*-current*|*-beta*)
+		die "this is a snapshot; build from sources matching it by hand" ;;
+	esac
+}
+
+stamp_get() {
+	[ -f "$STAMP" ] || return 0
+	sed -n "s/^$1=//p" "$STAMP" | head -1
+}
+
+syspatches() { syspatch -l 2>/dev/null | sort | sha256; }
+
+running_version() { sysctl -n kern.version | head -1; }
+kernel_version()  {
+	[ -f "$1" ] || return 0
+	strings "$1" | grep -m1 "^OpenBSD .*($CONF) #" || true
+}
+
+boot_image() {
+	[ -f "$BOOTCONF" ] || { print /bsd; return; }
+	img=$(sed -n 's/^[[:space:]]*set[[:space:]]\{1,\}image[[:space:]]\{1,\}//p' \
+	    "$BOOTCONF" | tail -1)
+	print -- "${img:-/bsd}"
+}
+
+set_boot_image() {
+	[ -f "$BOOTCONF" ] && cp -p "$BOOTCONF" "$BOOTCONF.vf2-bak"
+	{
+		[ -f "$BOOTCONF" ] &&
+		    grep -v '^[[:space:]]*set[[:space:]]\{1,\}image[[:space:]]' \
+		    "$BOOTCONF" || true
+		[ "$1" = /bsd ] || print -- "set image $1"
+	} > "$BOOTCONF.new"
+	if [ -s "$BOOTCONF.new" ]; then
+		mv -f "$BOOTCONF.new" "$BOOTCONF"
+	else
+		rm -f "$BOOTCONF.new" "$BOOTCONF"
+	fi
+	say "boot.conf now selects $1 (backup: $BOOTCONF.vf2-bak)"
+}
+
+fetch_sys() {
+	rel=$(release); nodot=$(print -- "$rel" | tr -d .)
+	key=/etc/signify/openbsd-$nodot-base.pub
+	tmp=$(mktemp -d /tmp/vf2-kernel.XXXXXXXX)
+	say "fetching and verifying sys.tar.gz for $rel"
+	ftp -o "$tmp/SHA256.sig" "$MIRROR/$rel/SHA256.sig"
+	ftp -o "$tmp/sys.tar.gz" "$MIRROR/$rel/sys.tar.gz"
+	(cd "$tmp" && signify -C -p "$key" -x SHA256.sig sys.tar.gz)
+	mkdir -p "$SRC"
+	tar -xzf "$tmp/sys.tar.gz" -C "$SRC"
+	rm -rf "$tmp"
+}
+
+source_fingerprint() {
+	{
+		release; branch
+		sha256 -q "$CONF_SRC"
+		find "$SYS" -path '*/CVS/Entries' -type f | sort | xargs cat
+	} | sha256
+}
+
+cmd_check() {
+	if [ ! -f "$KERNEL" ]; then
+		print "no $KERNEL yet"; return 1
+	fi
+	if [ "$(stamp_get RELEASE)" != "$(release)" ]; then
+		print "release changed: $(stamp_get RELEASE) -> $(release)"; return 1
+	fi
+	if [ "$(stamp_get SYSPATCHES)" != "$(syspatches)" ]; then
+		print "syspatches changed since the last build"; return 1
+	fi
+	if [ "$(stamp_get CONFIG)" != "$(sha256 -q "$CONF_SRC")" ]; then
+		print "kernel config changed"; return 1
+	fi
+	print "up to date"
+}
+
+cmd_status() {
+	print "release:          $(release) (branch $(branch))"
+	print "running kernel:   $(running_version)"
+	print "installed $KERNEL: $(kernel_version "$KERNEL")"
+	print "previous:         $(kernel_version "$KERNEL.prev")"
+	print "boot.conf image:  $(boot_image)"
+	print "last build:       $(stamp_get DATE)"
+	if [ -f /bsd.upgrade ] && [ "$(boot_image)" != /bsd ]; then
+		print "WARNING: /bsd.upgrade exists but boot.conf selects" \
+		    "$(boot_image); run: vf2-kernel pre-upgrade"
+	fi
+	set +e; cmd_check >/dev/null; st=$?; set -e
+	[ $st -eq 0 ] && print "rebuild:          not needed (offline check)" ||
+	    print "rebuild:          NEEDED -> vf2-kernel build"
+}
+
+cmd_build() {
+	force=0
+	[ "${1:-}" = -f ] && force=1
+	need_root; refuse_current
+	[ -f "$CONF_SRC" ] || die "missing $CONF_SRC"
+	mkdir "$LOCK" 2>/dev/null || die "another vf2-kernel is running ($LOCK)"
+	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+
+	[ -d "$SYS/CVS" ] || fetch_sys
+
+	say "updating $SYS to $(branch)"
+	(cd "$SYS" && cvs -q -d "$CVSROOT" update -Pd -r"$(branch)") |
+	    tee -a "$LOG"
+
+	fp=$(source_fingerprint)
+	if [ $force -eq 0 ] && [ -f "$KERNEL" ] && [ "$fp" = "$(stamp_get SOURCE)" ]
+	then
+		say "sources unchanged since the last build; nothing to do"
+		return 0
+	fi
+
+	say "configuring and building $CONF"
+	install -m 644 "$CONF_SRC" "$SYS/arch/riscv64/conf/$CONF"
+	(cd "$SYS/arch/riscv64/conf" && config "$CONF") | tee -a "$LOG"
+	cd "$SYS/arch/riscv64/compile/$CONF"
+	if [ "$(stamp_get BRANCH)" != "$(branch)" ]; then
+		make clean >/dev/null 2>&1 || true
+	fi
+	make -j "$(sysctl -n hw.ncpuonline)" 2>&1 | tee -a "$LOG"
+
+	built=
+	for f in obj/bsd bsd; do [ -f "$f" ] && built=$f && break; done
+	[ -n "$built" ] || die "build finished but no kernel was found"
+
+	install -o root -g wheel -m 700 "$built" "$KERNEL.new"
+	[ -f "$KERNEL" ] && mv -f "$KERNEL" "$KERNEL.prev"
+	mv -f "$KERNEL.new" "$KERNEL"
+
+	cat > "$STAMP" <<-EOF
+	DATE=$(date '+%Y-%m-%d %H:%M')
+	RELEASE=$(release)
+	BRANCH=$(branch)
+	SYSPATCHES=$(syspatches)
+	CONFIG=$(sha256 -q "$CONF_SRC")
+	SOURCE=$fp
+	EOF
+
+	say "installed $KERNEL: $(kernel_version "$KERNEL")"
+	say "boot.conf still selects $(boot_image). To test, reboot and at boot> type:"
+	say "    boot $KERNEL"
+	say "then, once it works, run: vf2-kernel activate"
+}
+
+cmd_activate() {
+	need_root
+	[ -f "$KERNEL" ] || die "no $KERNEL; run vf2-kernel build"
+	want=$(kernel_version "$KERNEL")
+	if [ "${1:-}" = -f ]; then
+		say "activating untested $KERNEL; if it fails, type at boot>:" \
+		    "boot $KERNEL.prev  (or: boot /bsd)"
+	elif [ "$(running_version)" != "$want" ]; then
+		die "you are not running $KERNEL. Boot it by hand first" \
+		    "(at boot> type: boot $KERNEL), then activate."
+	fi
+	set_boot_image "$KERNEL"
+}
+
+cmd_rollback() {
+	need_root
+	if [ -f "$KERNEL.prev" ]; then
+		mv -f "$KERNEL" "$KERNEL.bad" 2>/dev/null || true
+		mv -f "$KERNEL.prev" "$KERNEL"
+		set_boot_image "$KERNEL"
+		say "previous kernel restored; the failed one is $KERNEL.bad"
+	else
+		set_boot_image /bsd
+	fi
+}
+
+cmd_preupgrade() {
+	need_root
+	set_boot_image /bsd
+	say "stock /bsd is the default. Now: sysupgrade"
+	say "after the upgrade: vf2-kernel build, test at boot>, vf2-kernel activate"
+}
+
+case "${1:-status}" in
+status)		cmd_status ;;
+check)		cmd_check ;;
+build)		shift; cmd_build "$@" ;;
+activate)	shift; cmd_activate "$@" ;;
+rollback)	cmd_rollback ;;
+pre-upgrade)	cmd_preupgrade ;;
+*)		sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
+esac
