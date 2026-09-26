@@ -21,7 +21,7 @@
  * The DC8200 does not snoop the CPU caches.  The display controller is
  * given the framebuffer's real (below 4 GiB) address, and the CPU, the EFI
  * GOP and therefore the operating system use the SoC's uncached alias of
- * DRAM at +8 GiB, so every write reaches memory at once and no cache
+ * DRAM at +16 GiB, so every write reaches memory at once and no cache
  * maintenance is ever needed.  The real framebuffer RAM is marked
  * no-map/reserved in the device tree handed to the OS, which also puts it
  * in the EFI memory map as reserved.
@@ -47,10 +47,15 @@
 #include <linux/kernel.h>
 #include <linux/sizes.h>
 
-/* CPU view of DRAM without caching: DRAM + 8 GiB (see U-Boot jh7110 docs) */
-#define JH7110_UNCACHED_OFFSET		0x200000000ULL
-#define JH7110_DRAM_START		0x40000000ULL
-#define JH7110_DRAM_END			0x240000000ULL
+/*
+ * The JH7110 decodes DRAM twice: cached through the U74 front port at
+ * [0x0_4000_0000, 0x2_4000_0000) and uncached through the system port at
+ * [0x4_4000_0000, 0x6_4000_0000), i.e. physical address bit 34 set.  (This
+ * is the map in the Linux "XPbmtUC" RFC, which uses exactly that bit.  The
+ * 0x240000000 in U-Boot's JH7110 notes is where cached DRAM ends, not where
+ * the alias starts.)
+ */
+#define JH7110_UNCACHED_OFFSET		0x400000000ULL
 
 /* PMU */
 #define PMU_SW_TURN_ON_POWER		0x0c
@@ -135,10 +140,6 @@
 #define HDMI_DDC_BUS_FREQ_L		0x4b
 #define HDMI_DDC_BUS_FREQ_H		0x4c
 #define HDMI_HDCP_CTRL			0x52
-#define  HDCP_HDMI_MODE			BIT(1)
-#define HDMI_CONTROL_PACKET_BUF_INDEX	0x9f
-#define  INFOFRAME_AVI			0x06
-#define HDMI_CONTROL_PACKET_ADDR	0xa0
 #define HDMI_INTERRUPT_MASK1		0xc0
 #define HDMI_INTERRUPT_STATUS1		0xc1
 #define  INT_EDID_READY			BIT(2)
@@ -578,29 +579,12 @@ static void jh7110_dc_output(struct jh7110_hdmi_priv *p)
 	setbits_le32(p->dc + DC_DISP_PANEL_CONFIG_EX, PANEL_EX_COMMIT);
 }
 
-static void jh7110_hdmi_avi(struct jh7110_hdmi_priv *p)
-{
-	u8 frame[17] = { 0 };
-	u8 sum = 0;
-	int i;
-
-	frame[0] = 0x82;	/* AVI InfoFrame */
-	frame[1] = 0x02;	/* version 2 */
-	frame[2] = 0x0d;	/* 13 data bytes */
-	frame[4] = 0x10;	/* RGB, active format information present */
-	frame[5] = 0x28;	/* 16:9 picture, active format as picture */
-	frame[6] = 0x08;	/* full-range RGB quantization */
-	frame[7] = p->mode->vic;
-	for (i = 0; i < ARRAY_SIZE(frame); i++)
-		sum += frame[i];
-	frame[3] = 0x100 - sum;
-
-	hdmi_write(p, HDMI_CONTROL_PACKET_BUF_INDEX, INFOFRAME_AVI);
-	for (i = 0; i < ARRAY_SIZE(frame); i++)
-		hdmi_write(p, HDMI_CONTROL_PACKET_ADDR + i, frame[i]);
-}
-
-/* inno_hdmi_setup() for 8-bit full-range RGB */
+/*
+ * inno_hdmi_setup() for 8-bit full-range RGB, in DVI mode: without an EDID
+ * to say the sink is HDMI, that is what Linux does too, and it is what HFI
+ * BIOS uses.  Every HDMI sink accepts it, DVI sinks behind an adapter as
+ * well, and a framebuffer console needs neither audio nor InfoFrames.
+ */
 static int jh7110_hdmi_setup(struct jh7110_hdmi_priv *p)
 {
 	const struct jh7110_mode *m = p->mode;
@@ -608,7 +592,7 @@ static int jh7110_hdmi_setup(struct jh7110_hdmi_priv *p)
 
 	hdmi_modify(p, HDMI_AV_MUTE, AV_AUDIO_MUTE | AV_VIDEO_BLACK,
 		    AV_AUDIO_MUTE | AV_VIDEO_BLACK);
-	hdmi_write(p, HDMI_HDCP_CTRL, HDCP_HDMI_MODE);
+	hdmi_write(p, HDMI_HDCP_CTRL, 0);	/* DVI: no data islands */
 
 	ret = jh7110_phy_power_on(p);
 	if (ret)
@@ -644,7 +628,6 @@ static int jh7110_hdmi_setup(struct jh7110_hdmi_priv *p)
 	hdmi_write(p, HDMI_VIDEO_CONTRL3, 0x18);
 	hdmi_modify(p, HDMI_VIDEO_CONTRL, BIT(7) | BIT(0), BIT(0));
 
-	jh7110_hdmi_avi(p);
 	hdmi_ddc_rate(p, m->clock);
 
 	hdmi_modify(p, HDMI_AV_MUTE, AV_AUDIO_MUTE | AV_VIDEO_BLACK, 0);

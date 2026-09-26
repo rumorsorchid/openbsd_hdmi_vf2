@@ -44,9 +44,10 @@ pipeline up from cold:
 
 Where the values come from:
 - **Register values and order:** the Linux JH7110 display series v4 (September 2026: `jh7110-vout-subsystem`, `jh7110-inno-hdmi`, `phy-jh7110-inno-hdmi`, `inno-hdmi`) and the upstream VeriSilicon DC driver.
-- **Cross-check against hardware-proven code:** HFI BIOS 1.4's VisionFive 2 VideoBIOS module, disassembled. Its power, clock and reset sequence uses the same registers and bits as this driver, down to the same timeout. It differs in two places, and both are available here as fallbacks:
-  - HFI clocks the DC8200 from PLL2 / 8 rather than from the HDMI PHY (`VF2_HDMI_PIXCLK=pll2`).
-  - HFI runs the transmitter in DVI mode, and programs `SYS_CTRL` only after the PHY PLLs lock.
+- **Cross-check against hardware-proven code:** HFI BIOS 1.4's VisionFive 2 VideoBIOS module, disassembled. Its power, clock and reset sequence uses the same registers and bits as this driver, down to the same timeout. Where it differs:
+  - HFI clocks the DC8200 from PLL2 / 8 rather than from the HDMI PHY. Available here as a fallback: `VF2_HDMI_PIXCLK=pll2`.
+  - HFI runs the transmitter in DVI mode. This driver does too: without an EDID it is also what Linux does, every HDMI monitor accepts it, and a console needs no audio or InfoFrames.
+  - HFI programs `SYS_CTRL` only after the PHY PLLs lock; this driver follows Linux and sets the register clock to the system clock first, which makes the order irrelevant.
 - **What your OpenBSD drivers taught us** (kept in `reference/openbsd-native-drivers/`):
   - The pixel clock mux must select the HDMI PHY (`0x81000000`).
   - Your PHY tables match Linux register for register.
@@ -55,8 +56,20 @@ Where the values come from:
 **Caches: solved in firmware, once.** The DC8200 is given the framebuffer's
 real address (below 4 GiB). Everything on the CPU side (U-Boot's console, the
 EFI GOP and so OpenBSD and X) uses the JH7110's uncached view of the same
-RAM at +8 GiB. Every write reaches memory immediately, so there are no
-flushes, no `sfcc` changes, no private ioctl and no patched `wsfb`.
+RAM. Every write reaches memory immediately, so there are no flushes, no
+`sfcc` changes, no private ioctl and no patched `wsfb`.
+
+The JH7110 decodes DRAM twice:
+
+| Range | What |
+|---|---|
+| `0x0_4000_0000`–`0x2_3fff_ffff` | DRAM, cached (U74 front port) |
+| `0x4_4000_0000`–`0x6_3fff_ffff` | the same DRAM, uncached (system port): physical address bit 34 set |
+
+This map is from the Linux "XPbmtUC" RFC for the JH7110 (linux-riscv PR
+1618, March 2026), which builds on exactly that bit. U-Boot's JH7110 notes
+list `0x240000000`, but that is where cached DRAM ends, not where the alias
+starts; an earlier revision of this driver used it and would have faulted.
 
 The framebuffer RAM is marked reserved in the device tree handed to the OS,
 and through that in the EFI memory map, so OpenBSD never reuses it.

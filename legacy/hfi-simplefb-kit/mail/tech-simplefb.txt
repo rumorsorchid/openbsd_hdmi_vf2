@@ -1,0 +1,71 @@
+To: tech@openbsd.org
+Subject: riscv64: simplefb in GENERIC, and uncached framebuffer on JH7110
+
+[Send as plain text, diffs inline, no attachments. Before sending: re-test on
+a current snapshot if you can (the diffs are against -current), paste your
+dmesg at the end, and remove these bracketed notes.]
+
+Hi,
+
+On the StarFive VisionFive 2 (JH7110), the HFI BIOS firmware
+(https://gitlab.com/bios-riscv/hfi-bios, U-Boot based, GPL) brings up
+HDMI and provides an EFI GOP framebuffer.  efiboot turns that into a
+simple-framebuffer node, and simplefb(4) attaches fine, but riscv64
+GENERIC does not include simplefb, unlike arm64.
+
+The first diff adds it.
+
+With simplefb enabled, the picture on the JH7110 is corrupt: writes sit in
+the L2 cache and the DC8200 display controller, which is not coherent,
+scans stale memory.  The U74 cores have no Svpbmt, so PMAP_NOCACHE does
+not help.  The JH7110 has an uncached alias of DRAM at DRAM + 16 GiB
+(0x4_4000_0000, physical address bit 34).
+The second diff makes simplefb use that alias on the JH7110.  With it,
+both the console and Xorg (stock wsfb, ShadowFB) work at 1920x1080.
+
+[Describe your result honestly: console speed, X speed, anything odd.]
+
+If a quirk in simplefb is not the right place, the firmware could instead
+report the alias address in its GOP; I am happy to take it there.
+
+Tested on a VisionFive 2 v1.3B, 8 GB, OpenBSD 7.9-stable [and -current].
+dmesg below.
+
+Index: sys/arch/riscv64/conf/GENERIC
+--- sys/arch/riscv64/conf/GENERIC
++++ sys/arch/riscv64/conf/GENERIC
+@@ -44,6 +44,10 @@
+ # NS16550 compatible serial ports
+ com*		at fdt?
+
++# Framebuffer set up by firmware
++simplefb*	at fdt?
++wsdisplay*	at simplefb?
++
+ # Allwinner SoCs
+ sxiccmu*	at fdt? early 1
+ sxidog*		at fdt?
+
+Index: sys/dev/fdt/simplefb.c
+--- sys/dev/fdt/simplefb.c
++++ sys/dev/fdt/simplefb.c
+@@ -153,6 +153,17 @@
+ 	sc->sc_iot = faa->fa_iot;
+ 	sc->sc_paddr = faa->fa_reg[0].addr;
+ 	sc->sc_psize = faa->fa_reg[0].size;
++
++	/*
++	 * The StarFive JH7110 display controller does not snoop the CPU
++	 * caches, and its U74 cores ignore the page-table cacheability
++	 * bits.  Access the framebuffer through the SoC's uncached alias
++	 * of DRAM (DRAM + 16 GiB) so every write reaches memory at once.
++	 */
++	if (OF_is_compatible(OF_peer(0), "starfive,jh7110") &&
++	    sc->sc_paddr >= 0x40000000ULL && sc->sc_paddr < 0x240000000ULL)
++		sc->sc_paddr += 0x400000000ULL;
++
+ 	if (bus_space_map(sc->sc_iot, sc->sc_paddr, sc->sc_psize,
+ 	    BUS_SPACE_MAP_LINEAR | BUS_SPACE_MAP_PREFETCHABLE, &sc->sc_ioh)) {
+ 		printf(": can't map framebuffer\n");
+
+[dmesg]
