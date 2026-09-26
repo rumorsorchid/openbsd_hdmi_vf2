@@ -51,7 +51,13 @@ SOURCE_DATE_EPOCH='1783381843'
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${OUT:-$HERE/out}
-PLATFORM=${VF2_PLATFORM:-linux/amd64}
+# Build natively: an arm64 (Apple Silicon) and an amd64 container produce
+# byte-identical firmware from the same pinned sources and snapshot.
+case "$(uname -m)" in
+arm64|aarch64)	NATIVE=linux/arm64 ;;
+*)		NATIVE=linux/amd64 ;;
+esac
+PLATFORM=${VF2_PLATFORM:-$NATIVE}
 HDMI_MODE=${VF2_HDMI_MODE:-1080p}
 HDMI_PIXCLK=${VF2_HDMI_PIXCLK:-phy}
 case "$HDMI_MODE" in 1080p|720p) ;; *) echo "VF2_HDMI_MODE: 1080p or 720p" >&2; exit 64 ;; esac
@@ -156,8 +162,7 @@ cmd_build() {
 compare_expected() {
 	local want="$HERE/firmware/EXPECTED-SHA256SUMS"
 	[ -f "$want" ] || return 0
-	if [ "$PLATFORM" != linux/amd64 ] || [ "$HDMI_MODE" != 1080p ] ||
-	    [ "$HDMI_PIXCLK" != phy ]; then
+	if [ "$HDMI_MODE" != 1080p ] || [ "$HDMI_PIXCLK" != phy ]; then
 		say "not comparing with the reference hashes (non-default build)"
 		return 0
 	fi

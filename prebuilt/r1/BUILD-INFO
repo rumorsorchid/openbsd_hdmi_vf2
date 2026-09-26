@@ -1,0 +1,9 @@
+builder image    ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 (linux/amd64)
+ubuntu snapshot  20260925T000000Z
+compiler         riscv64-linux-gnu-gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+opensbi          v1.9 cbf9f6734dd85a982c63e3cb5db7ffe09da839ca
+u-boot           v2026.07 ece349ade2973e220f524ce59e59711cc919263f
+source date      1783381843
+hdmi             1080p, pixel clock from phy
+hdmi driver      9d76b5a16c36843e55a026b6cc0c2d9527f185eba0fec055054347340bd5d98e
+patch            1167c9d465394682dd0d2471449c8ee000a65c98bc77696b852e19117543ca43 0001-jh7110-hdmi-framebuffer-integration.patch

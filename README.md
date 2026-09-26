@@ -26,7 +26,7 @@ here, and nothing can replace it.
 
 | Part | State |
 |---|---|
-| Build script | Tested. Two clean builds are bit-identical; the hashes are in `firmware/EXPECTED-SHA256SUMS`. |
+| Build script | Tested. Clean builds are bit-identical, and an arm64 build (as on Apple Silicon) gives the same bytes as an amd64 build. The hashes are in `firmware/EXPECTED-SHA256SUMS`; the images themselves are in `prebuilt/r1/`. |
 | UART boot and flash tooling | XMODEM-1K and YMODEM tested against `lrzsz`. The flash sequence (version check, `sf probe`, `sf update`, read-back verification) was tested against real U-Boot code (the `sandbox` build with emulated SPI flash). Corrupted transfers are caught before anything is written. |
 | HDMI driver | Compiles warning-free (`-Werror`). **Not yet run on hardware.** That is what the UART boot below is for: it writes nothing to the board. |
 | OpenBSD kernel config and `vf2-kernel` | Syntax-checked; `boot.conf` handling tested. |
@@ -77,12 +77,15 @@ and through that in the EFI memory map, so OpenBSD never reuses it.
 ## You need
 
 - A Mac with Docker: Docker Desktop, or `brew install colima docker && colima start`.
-  - On Apple Silicon the build runs as `linux/amd64` so the output matches the reference hashes. It needs Rosetta or qemu in Docker, which Docker Desktop has.
-  - With colima, use `colima start --vm-type vz --vz-rosetta`.
+  - On Apple Silicon the build runs natively in an arm64 container; no Rosetta needed. An arm64 and an amd64 build produce byte-identical firmware (checked), so either matches `firmware/EXPECTED-SHA256SUMS`.
 - `python3`. macOS: `xcode-select --install`.
 - The USB serial adapter on the VisionFive 2 debug UART (115200 8N1).
 
-## 1. Build
+## 1. Build (or use the prebuilt images)
+
+Prebuilt images of the default build are in [`prebuilt/r1/`](prebuilt/r1/);
+to use them, prefix the commands below with `OUT=prebuilt/r1`. Building them
+yourself takes a few minutes and must give the same hashes.
 
 ```sh
 ./vf2-firmware.sh build
@@ -236,6 +239,8 @@ firmware/u-boot/files/          jh7110_hdmi.c (the HDMI driver)
 firmware/u-boot/patches/        Kconfig, Makefile, DT node, console env
 firmware/u-boot/vf2-hdmi.config config fragment (video on, env not in flash)
 firmware/EXPECTED-SHA256SUMS    reference hashes of the default build
+prebuilt/r1/                    the default build's images, ready to UART-boot/flash
+legacy/hfi-simplefb-kit/        the earlier HFI + patched simplefb approach
 tools/vf2uart.py                XMODEM/YMODEM, UART boot, flash, console
 tools/hfifw-extract.py          split an HFI package for re-flashing HFI
 openbsd/HDMIFB                  kernel config: GENERIC.MP + simplefb
