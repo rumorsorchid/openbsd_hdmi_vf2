@@ -1,14 +1,15 @@
 diff --git a/arch/riscv/dts/starfive-visionfive2-u-boot.dtsi b/arch/riscv/dts/starfive-visionfive2-u-boot.dtsi
-index 4c86d285..d1dc7a77 100644
+index 4c86d285..a290d285 100644
 --- a/arch/riscv/dts/starfive-visionfive2-u-boot.dtsi
 +++ b/arch/riscv/dts/starfive-visionfive2-u-boot.dtsi
-@@ -15,4 +15,23 @@
+@@ -15,4 +15,25 @@
  	assigned-clock-rates = <0>; /* FIXME: delete property and implement cpufreq */
  };
  
 +/ {
 +	/*
-+	 * JH7110 display pipeline for jh7110_hdmi (U-Boot only). The OS gets
++	 * JH7110 display pipeline for jh7110_hdmi. U-Boot only: the driver
++	 * removes this node from the device tree the OS receives, which gets
 +	 * the framebuffer through the EFI GOP instead.
 +	 */
 +	hdmi-framebuffer {
@@ -18,19 +19,20 @@ index 4c86d285..d1dc7a77 100644
 +		      <0x0 0x295b0000 0x0 0x10000>,
 +		      <0x0 0x295c0000 0x0 0x10000>,
 +		      <0x0 0x13020000 0x0 0x10000>,
-+		      <0x0 0x17030000 0x0 0x10000>;
++		      <0x0 0x17030000 0x0 0x10000>,
++		      <0x0 0x02010000 0x0 0x1000>;
 +		reg-names = "dc", "hdmi", "vout-syscon", "voutcrg", "syscrg",
-+			    "pmu";
++			    "pmu", "ccache";
 +		bootph-some-ram;
 +	};
 +};
 +
  #include "starfive-visionfive2-binman.dtsi"
 diff --git a/drivers/video/Kconfig b/drivers/video/Kconfig
-index c2acc131..0585118c 100644
+index c2acc131..5b247b34 100644
 --- a/drivers/video/Kconfig
 +++ b/drivers/video/Kconfig
-@@ -983,6 +983,41 @@ config VIDEO_DW_MIPI_DSI
+@@ -983,6 +983,43 @@ config VIDEO_DW_MIPI_DSI
  	  rather requires a SoC-specific glue driver to call it), it
  	  can not be enabled from the configuration menu.
  
@@ -39,10 +41,10 @@ index c2acc131..0585118c 100644
 +	depends on VIDEO && STARFIVE_JH7110
 +	help
 +	  Bring up the JH7110 DC8200 display controller, Innosilicon HDMI
-+	  transmitter and PHY at a fixed CEA mode (1080p60, or 720p60 with
-+	  hdmi_mode=720p), without any firmware blob. The framebuffer is
-+	  handed to the OS through the EFI GOP at the SoC's uncached alias
-+	  of DRAM, and its RAM is reserved in the OS device tree.
++	  transmitter and PHY at a fixed CEA mode (1080p60, or 720p60) in
++	  DVI mode, without any firmware blob. The framebuffer is handed to
++	  the OS through the EFI GOP at an uncached view of DRAM, checked on
++	  the running board, and its RAM is reserved in the OS device tree.
 +
 +config JH7110_HDMI_DEFAULT_MODE
 +	string "Default HDMI mode"
@@ -57,17 +59,19 @@ index c2acc131..0585118c 100644
 +	depends on VIDEO_STARFIVE_JH7110_HDMI
 +	help
 +	  By default the display controller's pixel clock comes from the HDMI
-+	  PHY, as in Linux. Say y to derive it from PLL2 instead, as HFI BIOS
-+	  does. The environment variable hdmi_pixclk (phy or pll2) overrides
-+	  it.
++	  PHY, as in StarFive's Linux driver. Say y to derive it from PLL2
++	  instead, as StarFive's U-Boot and HFI BIOS do. The environment
++	  variable hdmi_pixclk (phy or pll2) overrides it.
 +
 +config CMD_JH7110_HDMI
-+	bool "hdmiregs command"
++	bool "hdmiregs and hdmibars commands"
 +	depends on VIDEO_STARFIVE_JH7110_HDMI
 +	default y
 +	help
 +	  Adds "hdmiregs", which prints the clock, reset, routing, DC8200
-+	  and HDMI registers of the running display pipeline.
++	  and HDMI registers of the running display pipeline, and "hdmibars",
++	  which switches the HDMI transmitter to its own colour bars and
++	  back, to tell a transmitter problem from a display controller one.
 +
  config VIDEO_SIMPLE
  	bool "Simple display driver for preconfigured display"

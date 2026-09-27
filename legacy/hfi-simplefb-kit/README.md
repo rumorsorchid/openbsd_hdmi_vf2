@@ -2,7 +2,9 @@
 > OpenBSD's `simplefb` to use the uncached alias. The current approach (the
 > top of this repository) brings HDMI up in blob-free U-Boot instead, so
 > OpenBSD needs no source patch at all. Kept for reference and as a fallback
-> for boards that stay on HFI.
+> for boards that stay on HFI. Its patch hard-codes the uncached view at
+> DRAM + 16 GiB; the sources disagree on that (U-Boot's notes say
+> DRAM + 8 GiB), which is why the new firmware tests both on the board.
 
 # OpenBSD workstation on the VisionFive 2 with HFI BIOS
 

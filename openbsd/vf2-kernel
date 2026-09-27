@@ -4,17 +4,25 @@
 # simplefb, no source patches) in step with the installed OpenBSD release
 # and its syspatches.
 #
-#   vf2-kernel status        what is installed, running and selected
-#   vf2-kernel check         offline: is a rebuild due? (exit 1 if so)
-#   vf2-kernel build [-f]    update /usr/src/sys to the -stable branch,
-#                            rebuild if anything changed, install /bsd-hdmi
-#   vf2-kernel activate [-f] make /bsd-hdmi the default (only while running
-#                            it, unless -f)
-#   vf2-kernel rollback      make /bsd-hdmi.prev (else /bsd) the default
-#   vf2-kernel pre-upgrade   make stock /bsd the default before sysupgrade
+#   vf2-kernel status           what is installed, running and selected
+#   vf2-kernel check            offline: is a rebuild due? (exit 1 if so)
+#   vf2-kernel build [-f] [-m]  update /usr/src/sys to the -stable branch,
+#                               rebuild if anything changed, install /bsd-hdmi
+#                               (-f: rebuild anyway; -m: keep your own changes
+#                               to /usr/src/sys instead of refusing to build)
+#   vf2-kernel activate [-f]    make /bsd-hdmi the default (only while running
+#                               it, unless -f)
+#   vf2-kernel rollback         make /bsd-hdmi.prev (else /bsd) the default
+#   vf2-kernel upgrade [args]   make stock /bsd the default, then run
+#                               sysupgrade [args]
+#   vf2-kernel pre-upgrade      only make stock /bsd the default
 #
 # It never touches /bsd and never reboots.  Packages (Firefox & co.) keep
 # coming prebuilt from pkg_add; only this kernel is compiled locally.
+#
+# The kernel console stays on the serial port: OpenBSD/riscv64 has no early
+# framebuffer console, so "set tty fb0" in boot.conf would leave the kernel
+# without any console.  Selecting a kernel here also removes such a line.
 
 set -eu
 set -o pipefail
@@ -54,7 +62,8 @@ stamp_get() {
 	sed -n "s/^$1=//p" "$STAMP" | head -1
 }
 
-syspatches() { syspatch -l 2>/dev/null | sort | sha256; }
+# What syspatch -l lists, readable without root.
+syspatches() { ls /var/syspatch 2>/dev/null | sort | sha256; }
 
 running_version() { sysctl -n kern.version | head -1; }
 kernel_version()  {
@@ -62,18 +71,23 @@ kernel_version()  {
 	strings "$1" | grep -m1 "^OpenBSD .*($CONF) #" || true
 }
 
+boot_set() {
+	[ -f "$BOOTCONF" ] || return 0
+	sed -n "s/^[[:space:]]*set[[:space:]]\{1,\}$1[[:space:]]\{1,\}//p" \
+	    "$BOOTCONF" | tail -1
+}
+
 boot_image() {
-	[ -f "$BOOTCONF" ] || { print /bsd; return; }
-	img=$(sed -n 's/^[[:space:]]*set[[:space:]]\{1,\}image[[:space:]]\{1,\}//p' \
-	    "$BOOTCONF" | tail -1)
+	img=$(boot_set image)
 	print -- "${img:-/bsd}"
 }
 
 set_boot_image() {
+	oldtty=$(boot_set tty)
 	[ -f "$BOOTCONF" ] && cp -p "$BOOTCONF" "$BOOTCONF.vf2-bak"
 	{
 		[ -f "$BOOTCONF" ] &&
-		    grep -v '^[[:space:]]*set[[:space:]]\{1,\}image[[:space:]]' \
+		    grep -Ev '^[[:space:]]*set[[:space:]]+(image[[:space:]]|tty[[:space:]]+fb)' \
 		    "$BOOTCONF" || true
 		[ "$1" = /bsd ] || print -- "set image $1"
 	} > "$BOOTCONF.new"
@@ -83,6 +97,10 @@ set_boot_image() {
 		rm -f "$BOOTCONF.new" "$BOOTCONF"
 	fi
 	say "boot.conf now selects $1 (backup: $BOOTCONF.vf2-bak)"
+	case $oldtty in
+	fb*)	say "removed 'set tty $oldtty': it would leave the kernel" \
+		    "without a console; the console stays on serial" ;;
+	esac
 }
 
 fetch_sys() {
@@ -106,6 +124,17 @@ source_fingerprint() {
 	} | sha256
 }
 
+write_stamp() {
+	cat > "$STAMP" <<-EOF
+	DATE=$1
+	RELEASE=$(release)
+	BRANCH=$(branch)
+	SYSPATCHES=$(syspatches)
+	CONFIG=$(sha256 -q "$CONF_SRC")
+	SOURCE=$2
+	EOF
+}
+
 cmd_check() {
 	if [ ! -f "$KERNEL" ]; then
 		print "no $KERNEL yet"; return 1
@@ -123,38 +152,70 @@ cmd_check() {
 }
 
 cmd_status() {
+	tty=$(boot_set tty)
 	print "release:          $(release) (branch $(branch))"
 	print "running kernel:   $(running_version)"
 	print "installed $KERNEL: $(kernel_version "$KERNEL")"
 	print "previous:         $(kernel_version "$KERNEL.prev")"
 	print "boot.conf image:  $(boot_image)"
+	print "boot.conf tty:    ${tty:-(not set: serial)}"
 	print "last build:       $(stamp_get DATE)"
 	if [ -f /bsd.upgrade ] && [ "$(boot_image)" != /bsd ]; then
 		print "WARNING: /bsd.upgrade exists but boot.conf selects" \
 		    "$(boot_image); run: vf2-kernel pre-upgrade"
 	fi
+	case $tty in
+	fb*)	print "WARNING: 'set tty $tty' leaves the kernel without a" \
+		    "console; remove it from $BOOTCONF" ;;
+	esac
 	set +e; cmd_check >/dev/null; st=$?; set -e
 	[ $st -eq 0 ] && print "rebuild:          not needed (offline check)" ||
 	    print "rebuild:          NEEDED -> vf2-kernel build"
 }
 
 cmd_build() {
-	force=0
-	[ "${1:-}" = -f ] && force=1
+	force=0 keep=0
+	while getopts fm opt; do
+		case $opt in
+		f)	force=1 ;;
+		m)	keep=1 ;;
+		*)	die "usage: vf2-kernel build [-f] [-m]" ;;
+		esac
+	done
 	need_root; refuse_current
 	[ -f "$CONF_SRC" ] || die "missing $CONF_SRC"
 	mkdir "$LOCK" 2>/dev/null || die "another vf2-kernel is running ($LOCK)"
-	trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+	cvsout=
+	trap 'rm -f ${cvsout:+"$cvsout"}; rmdir "$LOCK" 2>/dev/null' EXIT
+	cvsout=$(mktemp /tmp/vf2-kernel-cvs.XXXXXXXX)
 
 	[ -d "$SYS/CVS" ] || fetch_sys
 
 	say "updating $SYS to $(branch)"
-	(cd "$SYS" && cvs -q -d "$CVSROOT" update -Pd -r"$(branch)") |
-	    tee -a "$LOG"
+	(cd "$SYS" && cvs -q -d "$CVSROOT" update -Pd -r"$(branch)") 2>&1 |
+	    tee -a "$LOG" "$cvsout"
+
+	# M: changed locally (old driver work?), C: conflicts with the update.
+	# Dropping them keeps each changed file as .#name.revision.
+	clean="cd $SYS && cvs -q -d $CVSROOT up -C -Pd -r$(branch)"
+	changed=$(grep -E '^[MC] ' "$cvsout" || true)
+	if [ -n "$changed" ]; then
+		print -u2 -- "$changed"
+		if grep -q '^C ' "$cvsout"; then
+			die "the update conflicts with your changes to $SYS" \
+			    "(C lines above). To drop your changes: $clean"
+		fi
+		[ $keep -eq 1 ] ||
+		die "$SYS has local changes (listed above), so this would not" \
+		    "be a stock kernel. To drop them: $clean ;" \
+		    "to build with them: vf2-kernel build -m"
+		say "building with the local changes listed above (-m)"
+	fi
 
 	fp=$(source_fingerprint)
 	if [ $force -eq 0 ] && [ -f "$KERNEL" ] && [ "$fp" = "$(stamp_get SOURCE)" ]
 	then
+		write_stamp "$(stamp_get DATE)" "$fp"
 		say "sources unchanged since the last build; nothing to do"
 		return 0
 	fi
@@ -176,14 +237,7 @@ cmd_build() {
 	[ -f "$KERNEL" ] && mv -f "$KERNEL" "$KERNEL.prev"
 	mv -f "$KERNEL.new" "$KERNEL"
 
-	cat > "$STAMP" <<-EOF
-	DATE=$(date '+%Y-%m-%d %H:%M')
-	RELEASE=$(release)
-	BRANCH=$(branch)
-	SYSPATCHES=$(syspatches)
-	CONFIG=$(sha256 -q "$CONF_SRC")
-	SOURCE=$fp
-	EOF
+	write_stamp "$(date '+%Y-%m-%d %H:%M')" "$fp"
 
 	say "installed $KERNEL: $(kernel_version "$KERNEL")"
 	say "boot.conf still selects $(boot_image). To test, reboot and at boot> type:"
@@ -224,12 +278,23 @@ cmd_preupgrade() {
 	say "after the upgrade: vf2-kernel build, test at boot>, vf2-kernel activate"
 }
 
+cmd_upgrade() {
+	need_root
+	set_boot_image /bsd
+	say "after the upgrade the stock kernel runs: HDMI keeps the boot"
+	say "loader's last screen. Log in on serial or over SSH and run:"
+	say "    vf2-kernel build; then test at boot>; then vf2-kernel activate"
+	say "running: sysupgrade $*"
+	exec sysupgrade "$@"
+}
+
 case "${1:-status}" in
 status)		cmd_status ;;
 check)		cmd_check ;;
 build)		shift; cmd_build "$@" ;;
 activate)	shift; cmd_activate "$@" ;;
 rollback)	cmd_rollback ;;
+upgrade)	shift; cmd_upgrade "$@" ;;
 pre-upgrade)	cmd_preupgrade ;;
-*)		sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
+*)		sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 64 ;;
 esac
