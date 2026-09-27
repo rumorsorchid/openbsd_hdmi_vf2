@@ -267,7 +267,7 @@ What has been tested:
 
 | Part | State |
 |---|---|
-| Firmware build | Clean builds are bit-identical, and an arm64 build (as on Apple Silicon) gives the same bytes as an amd64 build. No compiler warnings. |
+| Firmware build | Clean builds are bit-identical and compile without warnings. An arm64 build (as on Apple Silicon) gave the same bytes as an amd64 build for r1; for r2 only amd64 builds were compared. If your Mac's build does not say `reproduced`, the images are still built from the pinned sources: use `prebuilt/r2` and tell me. |
 | UART boot and flash tooling | XMODEM-1K and YMODEM were tested against `lrzsz`. The UART boot was tested end to end against a simulated mask ROM that greets the way the real one does (`(C)StarFive` before it asks for the SPL). The flash commands (version check, `sf probe`, `sf update`, read-back verification) were tested against real U-Boot code (`sandbox` with emulated SPI flash) for r1 and have not changed since. Corrupted transfers are caught before anything is written. |
 | HDMI driver | The uncached-view self-test, including recovery from an address that faults, was run under QEMU with OpenSBI v1.9. **Not yet run on hardware:** that is what step 3 is for. |
 | OpenBSD side | `setup.sh` and `vf2-kernel` were tested with OpenBSD 7.9's `ksh` (portable `oksh`), with stand-ins for `ftp`, `signify`, `cvs`, `config`, `make` and `sysupgrade`. The console, memory and boot-loader behaviour described here was checked against the OpenBSD 7.9 sources. |
