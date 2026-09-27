@@ -100,6 +100,11 @@ class Port:
         while self.read(quiet):
             pass
 
+    def discard_input(self):
+        """Drop whatever has arrived and not been read yet."""
+        self.pending = b""
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+
     def close(self):
         os.close(self.fd)
 
@@ -108,14 +113,21 @@ def crc16(data):
     return binascii.crc_hqx(data, 0)
 
 
-def send_block(port, seq, payload, size, pad, tries=10, ack_timeout=10):
+def send_block(port, seq, payload, size, pad, tries=10, ack_timeout=10,
+               first=False):
     head = STX if size == 1024 else SOH
     block = payload.ljust(size, pad)
     frame = bytes([head, seq & 0xFF, 0xFF - (seq & 0xFF)]) + block
     frame += crc16(block).to_bytes(2, "big")
     for _ in range(tries):
         port.write(frame)
-        c = port.getc(ack_timeout)
+        # A receiver still polling may have sent one more 'C' while the
+        # first block was on the wire; that is not a request to resend it.
+        crossed = time.monotonic() + 1.0 if first else 0
+        while True:
+            c = port.getc(ack_timeout)
+            if c != CRC or time.monotonic() >= crossed:
+                break
         if c == ACK:
             return True
         if c == CAN:
@@ -137,6 +149,54 @@ def wait_for_crc_request(port, timeout, what):
     raise TimeoutError("no XMODEM/YMODEM request from the %s" % what)
 
 
+def wait_for_poll(port, timeout, what, run=1, quiet=0.5):
+    """Wait until the receiver is polling and saying nothing else: `run`
+    'C' bytes in a row and `quiet` seconds without any other byte.  Text
+    before the poll is shown, and a 'C' inside it is not taken for one.
+
+    The JH7110 boot ROM needs run=5: it prints "(C)StarFive" before it
+    starts polling and once more a moment later, and a sender that starts
+    on an early C has that second greeting arrive where it expects an ACK.
+    """
+    deadline = time.monotonic() + timeout
+    seen = 0
+    last_other = time.monotonic()
+    while time.monotonic() < deadline:
+        c = port.getc(0.1)
+        if c == CRC:
+            seen += 1
+        elif c is not None:
+            # The C's held back were text after all
+            text = b"C" * seen + (bytes([c]) if c != NAK else b"")
+            seen = 0
+            last_other = time.monotonic()
+            sys.stdout.buffer.write(text)
+            sys.stdout.flush()
+        if seen >= run and time.monotonic() - last_other >= quiet:
+            # Polls that queued up while we waited are not replies
+            port.discard_input()
+            return
+    raise TimeoutError("no XMODEM/YMODEM request from the %s" % what)
+
+
+# Offset of the version word in the JH7110's sfspl header
+SFSPL_VERSION_OFFSET = 0x284
+SFSPL_VERSION = b"\x01\x01\x01\x01"
+ITB_MAX = 0xF00000      # the FIT slot runs from 0x100000 to the end of flash
+
+
+def check_images(spl, itb):
+    """The boot ROM checks a header it only finds in the .normal.out image;
+    the plain u-boot-spl.bin transfers fine and then boots nothing."""
+    if spl[SFSPL_VERSION_OFFSET:SFSPL_VERSION_OFFSET + 4] != SFSPL_VERSION:
+        raise ValueError("the SPL is not an sfspl image; use "
+                         "u-boot-spl.bin.normal.out, not u-boot-spl.bin")
+    if len(spl) > SPL_MAX:
+        raise ValueError("SPL is larger than its flash slot")
+    if len(itb) > ITB_MAX:
+        raise ValueError("u-boot.itb is larger than its flash slot")
+
+
 def send_eot(port):
     for _ in range(10):
         port.write(bytes([EOT]))
@@ -154,7 +214,8 @@ def progress(done, total, what):
 def xmodem1k_send(port, data, what):
     seq = 1
     for off in range(0, len(data), 1024):
-        send_block(port, seq, data[off:off + 1024], 1024, b"\x1a")
+        send_block(port, seq, data[off:off + 1024], 1024, b"\x1a",
+                   first=seq == 1)
         seq += 1
         progress(min(off + 1024, len(data)), len(data), what)
     send_eot(port)
@@ -163,11 +224,12 @@ def xmodem1k_send(port, data, what):
 
 def ymodem_send(port, name, data, what):
     header = name.encode() + b"\0" + str(len(data)).encode() + b"\0"
-    send_block(port, 0, header, 128, b"\0")
+    send_block(port, 0, header, 128, b"\0", first=True)
     wait_for_crc_request(port, 10, what)
     seq = 1
     for off in range(0, len(data), 1024):
-        send_block(port, seq, data[off:off + 1024], 1024, b"\x1a")
+        send_block(port, seq, data[off:off + 1024], 1024, b"\x1a",
+                   first=seq == 1)
         seq += 1
         progress(min(off + 1024, len(data)), len(data), what)
     send_eot(port)
@@ -212,16 +274,17 @@ def read_file(path):
 
 def cmd_boot(path, spl, itb):
     spl_data, itb_data = read_file(spl), read_file(itb)
+    check_images(spl_data, itb_data)
     port = Port(path)
     log("Waiting for the mask ROM. Power the board on now (boot switches")
     log("RGPIO_0 and RGPIO_1 both at H = UART boot)...")
     port.drain()
-    wait_for_crc_request(port, 300, "mask ROM")
-    log("ROM is asking; sending the SPL (XMODEM-1K)")
+    wait_for_poll(port, 300, "mask ROM", run=5)
+    log("\nROM is asking; sending the SPL (XMODEM-1K)")
     xmodem1k_send(port, spl_data, "SPL")
     log("Waiting for the SPL to bring up DRAM and ask for u-boot.itb...")
-    wait_for_crc_request(port, 60, "SPL")
-    log("Sending u-boot.itb (YMODEM)")
+    wait_for_poll(port, 60, "SPL")
+    log("\nSending u-boot.itb (YMODEM)")
     ymodem_send(port, os.path.basename(itb), itb_data, "u-boot.itb")
     console(port)
     port.close()
@@ -254,7 +317,7 @@ def uboot_crc32(output):
 def transfer_to_ram(port, name, data):
     port.drain()
     port.write(("loady %s\r" % LOAD_ADDR).encode())
-    wait_for_crc_request(port, 15, "U-Boot loady")
+    wait_for_poll(port, 15, "U-Boot loady")
     ymodem_send(port, name, data, name)
     port.drain(1.0)
 
@@ -288,8 +351,7 @@ def load_and_write(port, name, data, offset):
 
 def cmd_flash(path, spl, itb, force=False):
     spl_data, itb_data = read_file(spl), read_file(itb)
-    if len(spl_data) > SPL_MAX:
-        raise ValueError("SPL is larger than its flash slot")
+    check_images(spl_data, itb_data)
     port = Port(path)
     port.drain()
     out = run(port, "version", timeout=10)
