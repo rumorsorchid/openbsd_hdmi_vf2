@@ -22,7 +22,7 @@
 #
 # Everything that ends up on the board is compiled here from source:
 #   OpenSBI (M-mode firmware) and U-Boot (SPL with the open DDR init, and
-#   U-Boot proper with the HDMI framebuffer driver in firmware/u-boot).
+#   U-Boot proper with the HDMI framebuffer driver in firmware/).
 # The build runs in a container pinned by digest, with packages from a dated
 # Ubuntu snapshot, and every source tree is checked against a pinned commit.
 # Change the pins below only on purpose.
@@ -134,7 +134,7 @@ EOF
 cmd_build() {
 	local tag
 	need_docker
-	[ -f "$HERE/firmware/u-boot/files/drivers/video/jh7110_hdmi.c" ] ||
+	[ -f "$HERE/firmware/jh7110_hdmi.c" ] ||
 	    die "run this from a checkout of the openbsd_hdmi_vf2 repository"
 	tag=$(build_image)
 	mkdir -p "$OUT"

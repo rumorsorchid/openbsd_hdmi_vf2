@@ -6,4 +6,4 @@ u-boot           v2026.07 ece349ade2973e220f524ce59e59711cc919263f
 source date      1783381843
 hdmi             1080p, pixel clock from phy
 hdmi driver      f4136a6e5b4d82d2ba6330338217e526db3a2246522439971d8a4ba9a587de0f
-patch            3575673f966dce078dcb66fd279068402296b06265eda7e287fe06dcb0ba3f43 0001-jh7110-hdmi-framebuffer-integration.patch
+u-boot patch     3575673f966dce078dcb66fd279068402296b06265eda7e287fe06dcb0ba3f43

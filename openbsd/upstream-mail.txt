@@ -1,0 +1,39 @@
+To: tech@openbsd.org
+Subject: riscv64: add simplefb to GENERIC
+
+[Plain text, diff inline, no attachments. Send it only once HDMI works on
+your board with the HDMIFB kernel. Paste your dmesg at the end and delete
+these bracketed notes.]
+
+Hi,
+
+arm64 GENERIC has simplefb(4), riscv64 GENERIC does not.  On riscv64
+boards whose firmware sets up a display and hands it over through the
+EFI GOP, efiboot already creates the simple-framebuffer node, but
+nothing attaches to it.
+
+On a StarFive VisionFive 2 (JH7110) with U-Boot that brings up HDMI
+itself (https://github.com/rumorsorchid/openbsd_hdmi_vf2), the diff
+below gives a wsdisplay on HDMI, and Xorg runs with the stock wsfb
+driver.  The firmware hands the framebuffer over at the SoC's uncached
+view of DRAM, so the kernel needs no cache handling for it.  The
+kernel console stays on the serial port.
+
+Tested on 7.9-stable [and -current, if you tried it].
+
+Index: sys/arch/riscv64/conf/GENERIC
+--- sys/arch/riscv64/conf/GENERIC
++++ sys/arch/riscv64/conf/GENERIC
+@@ -44,6 +44,10 @@
+ # NS16550 compatible serial ports
+ com*		at fdt?
+ 
++# Framebuffer set up by the firmware
++simplefb*	at fdt?
++wsdisplay*	at simplefb?
++
+ # Allwinner SoCs
+ sxiccmu*	at fdt? early 1
+ sxidog*		at fdt?
+
+[dmesg]
